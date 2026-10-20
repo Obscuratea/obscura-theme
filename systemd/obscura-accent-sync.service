@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync Obscura Kvantum/Aurorae themes with the Plasma accent
+# kdeglobals can change many times in a burst; never rate-limit the sync
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/obscura-accent-sync

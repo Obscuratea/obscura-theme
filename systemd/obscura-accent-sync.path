@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch kdeglobals for accent / colour scheme changes
+
+[Path]
+PathChanged=%h/.config/kdeglobals
+PathChanged=%h/.config/kdedefaults/kdeglobals
+Unit=obscura-accent-sync.service
+
+[Install]
+WantedBy=default.target

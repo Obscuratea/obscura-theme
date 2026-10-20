@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Keep the Kvantum and Aurorae layers in step with the System Settings accent.
+
+Plasma and Qt-palette consumers follow the accent on their own. Kvantum and Aurorae bake
+colours into SVG, so this regenerates them whenever the accent or the dark/light scheme
+changes. Does nothing unless an Obscura colour scheme is active.
+Run with --force to regenerate regardless.
+"""
+import json, pathlib, subprocess, sys, time
+
+HOME = pathlib.Path.home()
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HOME / ".local/share/obscura/tools"))
+from palette import DEFAULT_ACCENT, hexs  # noqa: E402
+import gen_kvantum, gen_aurorae  # noqa: E402
+try:  # cursors need PySide6; without it the rest of the sync still works
+    import gen_cursors
+except ImportError:
+    gen_cursors = None
+
+STATE = HOME / ".cache/obscura/accent-state.json"
+
+
+def kread(file, group, key):
+    """kreadconfig6 follows KDE's real cascade (kdeglobals over kdedefaults); a Global Theme
+    writes the scheme and style into kdedefaults, so reading the raw file would miss them."""
+    return subprocess.run(["kreadconfig6", "--file", file, "--group", group, "--key", key],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def current():
+    scheme = kread("kdeglobals", "General", "ColorScheme")
+    if scheme.startswith("ObscuraDark"):
+        variant = "dark"
+    elif scheme.startswith("ObscuraLight"):
+        variant = "light"
+    else:
+        return None
+    # DecorationFocus is the exact accent; Selection/BackgroundNormal is darkened by KDE for contrast.
+    raw = kread("kdeglobals", "Colors:View", "DecorationFocus")
+    try:
+        accent = hexs(tuple(int(x) for x in raw.split(",")))
+    except ValueError:
+        accent = DEFAULT_ACCENT
+    return variant, accent
+
+
+def run(*cmd):
+    subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def ensure_selected(name):
+    """Point Kvantum / the decoration at the matching variant. Cheap, so it runs every time:
+    KDE writes the scheme and the widget style in separate steps and we may fire in between."""
+    if kread("kdeglobals", "KDE", "widgetStyle").lower() == "kvantum":
+        kv = HOME / ".config/Kvantum/kvantum.kvconfig"
+        have = ""
+        if kv.exists():
+            have = next((l.split("=", 1)[1].strip() for l in kv.read_text().splitlines() if l.startswith("theme=")), "")
+        if have != name:
+            run("kwriteconfig6", "--file", str(kv), "--group", "General", "--key", "theme", name)
+    deco = kread("kwinrc", "org.kde.kdecoration2", "theme")
+    if deco.startswith("__aurorae__svg__Obscura") and deco != f"__aurorae__svg__{name}":
+        run("kwriteconfig6", "--file", "kwinrc", "--group", "org.kde.kdecoration2", "--key", "theme", f"__aurorae__svg__{name}")
+        run("qdbus6", "org.kde.KWin", "/KWin", "reconfigure")
+
+
+SLOTS = ("Obscura-Cursors", "Obscura-Cursors-2")
+
+
+def refresh_cursors(accent):
+    """KDE only reloads cursors when the cursor-theme *setting* changes, so rewriting files in place
+    does nothing. Build the new accent into the idle slot and switch to it. Only if the user is on
+    one of our cursor themes."""
+    import shutil
+    cur = kread("kcminputrc", "Mouse", "cursorTheme")
+    if gen_cursors is None or cur not in SLOTS:
+        return
+    nxt = SLOTS[1] if cur == SLOTS[0] else SLOTS[0]
+    tmp = HOME / ".cache/obscura/cursors"
+    shutil.rmtree(tmp, ignore_errors=True)
+    gen_cursors.write(tmp, accent, name=nxt)
+    dest = HOME / ".icons" / nxt
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.move(str(tmp / nxt), str(dest))
+    run("plasma-apply-cursortheme", nxt)
+
+
+def main():
+    time.sleep(0.4)  # let KDE finish writing kdeglobals
+    cur = current()
+    if cur is None:
+        return
+    variant, accent = cur
+    name = "ObscuraDark" if variant == "dark" else "ObscuraLight"
+    fresh = "--force" in sys.argv
+    if not fresh:
+        try:
+            fresh = json.loads(STATE.read_text()) != {"variant": variant, "accent": accent}
+        except (OSError, ValueError):
+            fresh = True
+    if fresh:
+        gen_kvantum.write(variant, HOME / ".config/Kvantum", accent)
+        gen_aurorae.write(variant, HOME / ".local/share/aurorae/themes", accent)
+        refresh_cursors(accent)
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps({"variant": variant, "accent": accent}))
+    ensure_selected(name)
+    if fresh:
+        run("qdbus6", "org.kde.KWin", "/KWin", "reconfigure")
+
+
+if __name__ == "__main__":
+    main()
